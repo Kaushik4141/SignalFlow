@@ -10,6 +10,7 @@ import {
   type DiagnosticIssue,
 } from '@signalflow/shared';
 import { SdpTextarea } from '@/components/SdpTextarea';
+import { SdpDiffViewer } from '@/components/SdpDiffViewer';
 import { IssuesPanel } from '@/components/IssuesPanel';
 import { ShareButton } from '@/components/ShareButton';
 import { BrowserBadge } from '@/components/BrowserBadge';
@@ -235,55 +236,11 @@ export default function ComparePage() {
                   </span>
                 )}
               </h2>
-
-              {result.diff.items.length === 0 ? (
-                <div className="rounded-lg border border-green-500/20 bg-green-500/5 px-4 py-3">
-                  <p className="text-sm font-medium text-green-400">
-                    ✓ SDPs are identical — no differences found
-                  </p>
-                </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  {result.diff.items.map((item, i) => {
-                    const borderColor =
-                      item.type === 'changed'
-                        ? 'border-l-amber-500'
-                        : item.type === 'added'
-                          ? 'border-l-green-500'
-                          : item.type === 'removed'
-                            ? 'border-l-red-500'
-                            : 'border-l-zinc-700';
-
-                    return (
-                      <div
-                        key={`${item.path}-${i}`}
-                        className={`rounded-lg border border-zinc-800 bg-zinc-900/50 border-l-4 ${borderColor}`}
-                      >
-                        <div className="px-4 py-2.5">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs text-zinc-500">
-                              {item.path}
-                            </span>
-                            <span className="text-xs font-semibold text-zinc-200">
-                              {item.label}
-                            </span>
-                          </div>
-                          {(item.valueBefore || item.valueAfter) && (
-                            <div className="mt-1 flex flex-wrap gap-3 font-mono text-xs">
-                              {item.valueBefore && (
-                                <span className="text-red-400">− {item.valueBefore}</span>
-                              )}
-                              {item.valueAfter && (
-                                <span className="text-green-400">+ {item.valueAfter}</span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+              <SdpDiffViewer
+                diff={result.diff}
+                parsed1={result.parsed1}
+                parsed2={result.parsed2}
+              />
             </div>
 
             {/* Issues panel — 1 column */}
