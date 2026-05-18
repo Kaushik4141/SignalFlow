@@ -1,287 +1,191 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
-import {
-  parseSDP,
-  validateSDP,
-  diffSDPs,
-  runDiagnostics,
-  type ParsedSDP,
-  type SDPSource,
-  type SDPDiffResult,
-  type DiagnosticIssue,
-} from '@signalflow/shared';
-import { SdpTextarea } from '@/components/SdpTextarea';
-import { IssuesPanel } from '@/components/IssuesPanel';
-import { ShareButton } from '@/components/ShareButton';
-import { BrowserBadge } from '@/components/BrowserBadge';
-import { saveToHash, loadFromHash } from '@/lib/share';
+import { useState } from 'react';
+import Link from 'next/link';
 
-// ── Diff display helpers ────────────────────────────────────────────
-
-function DiffSummaryBar({ diff }: { diff: SDPDiffResult }) {
-  const { summary } = diff;
-  const total =
-    summary.changes + summary.additions + summary.removals + summary.errors + summary.warnings;
-  if (total === 0) {
-    return (
-      <div className="rounded-lg border border-green-500/20 bg-green-500/5 px-4 py-3">
-        <p className="text-sm font-medium text-green-400">
-          ✓ SDPs are identical — no differences found
-        </p>
-      </div>
-    );
+const SNIPPET = `const _orig = RTCPeerConnection.prototype.setLocalDescription;
+RTCPeerConnection.prototype.setLocalDescription = function(desc) {
+  if (desc?.sdp) {
+    console.log('%c[SignalFlow] ' + desc.type.toUpperCase(), 'color: #34d399; font-weight: bold');
+    console.log(desc.sdp);
   }
-  return (
-    <div className="flex flex-wrap items-center gap-2 text-xs">
-      {summary.changes > 0 && (
-        <span className="rounded bg-amber-500/20 px-2 py-0.5 font-medium text-amber-300">
-          {summary.changes} changed
-        </span>
-      )}
-      {summary.additions > 0 && (
-        <span className="rounded bg-green-500/20 px-2 py-0.5 font-medium text-green-300">
-          {summary.additions} added
-        </span>
-      )}
-      {summary.removals > 0 && (
-        <span className="rounded bg-red-500/20 px-2 py-0.5 font-medium text-red-300">
-          {summary.removals} removed
-        </span>
-      )}
-    </div>
-  );
-}
+  return _orig.apply(this, arguments);
+};`;
 
-function DiffItemsList({ diff }: { diff: SDPDiffResult }) {
-  if (diff.items.length === 0) return null;
+const EXAMPLES = [
+  {
+    title: 'Missing TURN server',
+    subtitle: 'Will fail for ~15% of users behind corporate NAT',
+    dot: 'bg-red-500',
+    slug: 'missing-turn',
+  },
+  {
+    title: 'Chrome → Safari codec gap',
+    subtitle: "AV1 offered but Safari can't accept it",
+    dot: 'bg-yellow-500',
+    slug: 'chrome-safari',
+  },
+  {
+    title: 'Simulcast RID mismatch',
+    subtitle: 'SFU silently drops video layers',
+    dot: 'bg-red-500',
+    slug: 'simulcast-broken',
+  },
+  {
+    title: 'Healthy negotiation',
+    subtitle: 'What a working offer/answer looks like',
+    dot: 'bg-green-500',
+    slug: 'healthy',
+  },
+];
 
-  const typeColor: Record<string, string> = {
-    changed: 'border-l-amber-500',
-    added: 'border-l-green-500',
-    removed: 'border-l-red-500',
-    unchanged: 'border-l-zinc-700',
+export default function HomePage() {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(SNIPPET);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy', err);
+    }
   };
 
   return (
-    <div className="flex flex-col gap-2">
-      {diff.items.map((item, i) => (
-        <div
-          key={`${item.path}-${i}`}
-          className={`rounded-lg border border-zinc-800 bg-zinc-900/50 border-l-4 ${typeColor[item.type] ?? 'border-l-zinc-700'}`}
-        >
-          <div className="px-4 py-2.5">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-mono text-zinc-500">{item.path}</span>
-              <span className="text-xs font-semibold text-zinc-200">{item.label}</span>
-            </div>
-            {(item.valueBefore || item.valueAfter) && (
-              <div className="mt-1 flex flex-wrap gap-3 text-xs font-mono">
-                {item.valueBefore && (
-                  <span className="text-red-400">
-                    − {item.valueBefore}
-                  </span>
-                )}
-                {item.valueAfter && (
-                  <span className="text-green-400">
-                    + {item.valueAfter}
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Main page ───────────────────────────────────────────────────────
-
-export default function Home() {
-  const [sdp1Raw, setSdp1Raw] = useState('');
-  const [sdp2Raw, setSdp2Raw] = useState('');
-  const [error1, setError1] = useState<string | null>(null);
-  const [error2, setError2] = useState<string | null>(null);
-  const [parsed1, setParsed1] = useState<ParsedSDP | null>(null);
-  const [parsed2, setParsed2] = useState<ParsedSDP | null>(null);
-  const [diff, setDiff] = useState<SDPDiffResult | null>(null);
-  const [issues, setIssues] = useState<DiagnosticIssue[]>([]);
-  const [activeTab, setActiveTab] = useState<'diff' | 'diagnostics'>('diagnostics');
-
-  // Load from URL hash on mount
-  useEffect(() => {
-    const saved = loadFromHash();
-    if (saved) {
-      setSdp1Raw(saved.sdp1);
-      setSdp2Raw(saved.sdp2);
-    }
-  }, []);
-
-  // Analyze whenever inputs change
-  const analyze = useCallback(() => {
-    // Validate & parse SDP 1
-    const v1 = validateSDP(sdp1Raw);
-    if (!v1.valid) {
-      setError1(v1.error ?? 'Invalid SDP');
-      setParsed1(null);
-    } else {
-      setError1(null);
-      setParsed1(parseSDP(sdp1Raw));
-    }
-
-    // Validate & parse SDP 2
-    const v2 = validateSDP(sdp2Raw);
-    if (!v2.valid) {
-      setError2(v2.error ?? 'Invalid SDP');
-      setParsed2(null);
-    } else {
-      setError2(null);
-      setParsed2(parseSDP(sdp2Raw));
-    }
-  }, [sdp1Raw, sdp2Raw]);
-
-  // Run analysis when parsed results change
-  useEffect(() => {
-    if (parsed1 && parsed2) {
-      setDiff(diffSDPs(parsed1, parsed2));
-      setIssues(runDiagnostics(parsed1, parsed2));
-      saveToHash(sdp1Raw, sdp2Raw);
-    } else {
-      setDiff(null);
-      setIssues([]);
-    }
-  }, [parsed1, parsed2, sdp1Raw, sdp2Raw]);
-
-  // Re-analyze when text changes (debounced feel via useEffect)
-  useEffect(() => {
-    if (!sdp1Raw && !sdp2Raw) return;
-    analyze();
-  }, [sdp1Raw, sdp2Raw, analyze]);
-
-  const hasResults = parsed1 && parsed2;
-
-  return (
-    <div className="flex min-h-full flex-col bg-zinc-950">
+    <div className="flex min-h-full flex-col" style={{ backgroundColor: '#0d0d0d' }}>
       {/* ── Header ──────────────────────────────────────────────── */}
-      <header className="border-b border-zinc-800/60 bg-zinc-950">
+      <header className="border-b border-zinc-800/60">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-purple-600">
               <span className="text-sm font-bold text-white">SF</span>
             </div>
-            <div>
-              <h1 className="text-lg font-semibold text-zinc-100">SignalFlow</h1>
-              <p className="text-xs text-zinc-500">WebRTC SDP Analyzer</p>
-            </div>
+            <h1 className="text-lg font-semibold tracking-tight text-zinc-100">
+              SignalFlow
+            </h1>
           </div>
-          <div className="flex items-center gap-3">
-            {hasResults && <ShareButton />}
-            {parsed1 && (
-              <div className="flex items-center gap-1.5 text-xs text-zinc-500">
-                Source: <BrowserBadge source={parsed1.source} />
-              </div>
-            )}
-          </div>
+          <Link
+            href="/compare"
+            className="rounded-lg bg-zinc-800 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700"
+          >
+            Launch app
+          </Link>
         </div>
       </header>
 
-      {/* ── SDP Input Area ──────────────────────────────────────── */}
-      <main className="mx-auto w-full max-w-7xl flex-1 px-6 py-8">
-        <div className="grid gap-6 lg:grid-cols-2">
-          <SdpTextarea
-            label="Offer SDP"
-            value={sdp1Raw}
-            onChange={setSdp1Raw}
-            error={error1}
-            source={parsed1?.source}
-          />
-          <SdpTextarea
-            label="Answer SDP"
-            value={sdp2Raw}
-            onChange={setSdp2Raw}
-            error={error2}
-            source={parsed2?.source}
-          />
-        </div>
+      <main className="flex-1">
+        {/* ── Hero ──────────────────────────────────────────────── */}
+        <section className="mx-auto max-w-4xl px-6 py-24 text-center lg:py-32">
+          <h2 className="text-4xl font-extrabold tracking-tight text-white sm:text-5xl lg:text-6xl">
+            Debug WebRTC calls.<br />
+            <span className="text-zinc-500">Understand why they fail.</span>
+          </h2>
+          <p className="mx-auto mt-6 max-w-2xl text-lg text-zinc-400">
+            Paste two SDP strings. Get instant visual diff + plain-English diagnosis of every failure.
+          </p>
+          <div className="mt-10 flex items-center justify-center gap-4">
+            <Link
+              href="/compare"
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-8 py-3.5 font-medium text-white transition-colors hover:bg-blue-500"
+            >
+              Open SDP Diff &rarr;
+            </Link>
+          </div>
+        </section>
 
-        {/* ── Results ───────────────────────────────────────────── */}
-        {hasResults && (
-          <div className="mt-10">
-            {/* Tab bar */}
-            <div className="flex items-center gap-1 border-b border-zinc-800/60 pb-px">
-              <button
-                onClick={() => setActiveTab('diagnostics')}
-                className={`rounded-t-lg px-4 py-2 text-sm font-medium transition-colors ${
-                  activeTab === 'diagnostics'
-                    ? 'bg-zinc-800/60 text-zinc-100'
-                    : 'text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                Diagnostics
-                {issues.length > 0 && (
-                  <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-red-500/20 px-1.5 text-xs font-semibold text-red-300">
-                    {issues.length}
-                  </span>
-                )}
-              </button>
-              <button
-                onClick={() => setActiveTab('diff')}
-                className={`rounded-t-lg px-4 py-2 text-sm font-medium transition-colors ${
-                  activeTab === 'diff'
-                    ? 'bg-zinc-800/60 text-zinc-100'
-                    : 'text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                Diff
-                {diff && diff.items.length > 0 && (
-                  <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500/20 px-1.5 text-xs font-semibold text-amber-300">
-                    {diff.items.length}
-                  </span>
-                )}
-              </button>
+        {/* ── Console Snippet ───────────────────────────────────── */}
+        <section className="border-y border-zinc-800/60 bg-zinc-900/30">
+          <div className="mx-auto max-w-5xl px-6 py-24">
+            <div className="mx-auto max-w-2xl text-center">
+              <h3 className="text-2xl font-bold tracking-tight text-white">
+                Capture SDP from any app
+              </h3>
+              <p className="mt-4 text-zinc-400">
+                Paste this in browser DevTools on any WebRTC app — Google Meet, your own app, anything.
+              </p>
             </div>
-
-            {/* Tab content */}
-            <div className="mt-6">
-              {activeTab === 'diagnostics' && (
-                <IssuesPanel issues={issues} />
-              )}
-
-              {activeTab === 'diff' && diff && (
-                <div className="flex flex-col gap-4">
-                  <DiffSummaryBar diff={diff} />
-                  <DiffItemsList diff={diff} />
+            <div className="mx-auto mt-10 max-w-3xl overflow-hidden rounded-xl border border-zinc-800/80 bg-black/60 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-zinc-800/80 bg-zinc-900/80 px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <div className="flex gap-1.5">
+                    <div className="h-3 w-3 rounded-full bg-red-500/20 border border-red-500/50"></div>
+                    <div className="h-3 w-3 rounded-full bg-yellow-500/20 border border-yellow-500/50"></div>
+                    <div className="h-3 w-3 rounded-full bg-green-500/20 border border-green-500/50"></div>
+                  </div>
+                  <span className="ml-2 text-xs font-medium text-zinc-500 font-mono">devtools.js</span>
                 </div>
-              )}
+                <button
+                  onClick={handleCopy}
+                  className="rounded bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-zinc-700"
+                >
+                  {copied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <div className="p-5 overflow-x-auto">
+                <pre className="font-mono text-sm leading-relaxed text-zinc-300">
+                  <span className="text-purple-400">const</span> _orig = RTCPeerConnection.prototype.setLocalDescription;
+                  <br />
+                  RTCPeerConnection.prototype.setLocalDescription = <span className="text-purple-400">function</span>(desc) {'{'}
+                  <br />
+                  {'  '}<span className="text-purple-400">if</span> (desc?.sdp) {'{'}
+                  <br />
+                  {'    '}console.log(<span className="text-green-300">"%c[SignalFlow] "</span> + desc.type.toUpperCase(), <span className="text-green-300">"color: #34d399; font-weight: bold"</span>);
+                  <br />
+                  {'    '}console.log(desc.sdp);
+                  <br />
+                  {'  }'}
+                  <br />
+                  {'  '}<span className="text-purple-400">return</span> _orig.apply(<span className="text-blue-400">this</span>, arguments);
+                  <br />
+                  {'}'};
+                </pre>
+              </div>
             </div>
           </div>
-        )}
+        </section>
 
-        {/* Empty state */}
-        {!hasResults && !sdp1Raw && !sdp2Raw && (
-          <div className="mt-16 flex flex-col items-center gap-4 text-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-zinc-800/50">
-              <span className="text-2xl">📡</span>
-            </div>
-            <h2 className="text-xl font-semibold text-zinc-200">
-              Paste your WebRTC SDPs
-            </h2>
-            <p className="max-w-md text-sm leading-relaxed text-zinc-500">
-              Paste an Offer SDP on the left and an Answer SDP on the right.
-              SignalFlow will detect the source browser, diff the two, and run
-              18 diagnostic rules to surface issues with ICE, DTLS, codecs,
-              simulcast, and BUNDLE.
-            </p>
+        {/* ── Example Gallery ───────────────────────────────────── */}
+        <section className="mx-auto max-w-7xl px-6 py-24">
+          <div className="mx-auto max-w-2xl text-center">
+            <h3 className="text-2xl font-bold tracking-tight text-white">
+              See it in action
+            </h3>
           </div>
-        )}
+          <div className="mt-12 grid gap-6 sm:grid-cols-2 xl:grid-cols-4">
+            {EXAMPLES.map((ex, i) => (
+              <div
+                key={i}
+                className="group relative flex flex-col justify-between overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6 transition-colors hover:bg-zinc-900/80 hover:border-zinc-700"
+              >
+                <div>
+                  <div className="flex items-center gap-3">
+                    <span className={`h-2.5 w-2.5 rounded-full ${ex.dot} shadow-[0_0_12px_rgba(0,0,0,0.5)]`} />
+                    <h4 className="text-sm font-semibold text-zinc-200">
+                      {ex.title}
+                    </h4>
+                  </div>
+                  <p className="mt-3 text-sm leading-relaxed text-zinc-500">
+                    {ex.subtitle}
+                  </p>
+                </div>
+                <div className="mt-8">
+                  <Link
+                    href={`/compare?example=${ex.slug}`}
+                    className="inline-flex items-center gap-2 text-sm font-medium text-blue-400 transition-colors group-hover:text-blue-300"
+                  >
+                    Open example &rarr;
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
       </main>
 
       {/* ── Footer ──────────────────────────────────────────────── */}
-      <footer className="border-t border-zinc-800/40 py-4">
-        <p className="text-center text-xs text-zinc-600">
-          SignalFlow — Open-source WebRTC SDP debugger
-        </p>
+      <footer className="border-t border-zinc-800/40 py-8 text-center text-sm text-zinc-600">
+        MIT licensed &middot; Open source &middot; Built for WebRTC developers
       </footer>
     </div>
   );

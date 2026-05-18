@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   parseSDP,
   diffSDPs,
@@ -15,6 +16,7 @@ import { IssuesPanel } from '@/components/IssuesPanel';
 import { ShareButton } from '@/components/ShareButton';
 import { BrowserBadge } from '@/components/BrowserBadge';
 import { saveToHash, loadFromHash } from '@/lib/share';
+import { EXAMPLES_BY_SLUG } from '@/lib/example-sdps';
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -54,7 +56,8 @@ function Spinner() {
 
 // ── Page ────────────────────────────────────────────────────────────
 
-export default function ComparePage() {
+function ComparePageInner() {
+  const searchParams = useSearchParams();
   const [sdp1Raw, setSdp1Raw] = useState('');
   const [sdp2Raw, setSdp2Raw] = useState('');
   const [result, setResult] = useState<CompareResult | null>(null);
@@ -105,16 +108,27 @@ export default function ComparePage() {
     setIsComparing(false);
   }, []);
 
-  // ── Load from URL hash on mount ─────────────────────────────────
+  // ── Load from query param or URL hash on mount ──────────────────
 
   useEffect(() => {
+    // 1. Check for ?example= query param
+    const exampleSlug = searchParams.get('example');
+    if (exampleSlug && EXAMPLES_BY_SLUG[exampleSlug]) {
+      const ex = EXAMPLES_BY_SLUG[exampleSlug];
+      setSdp1Raw(ex.sdp1);
+      setSdp2Raw(ex.sdp2);
+      runCompare(ex.sdp1, ex.sdp2);
+      return;
+    }
+
+    // 2. Fall back to URL hash
     const saved = loadFromHash();
     if (saved) {
       setSdp1Raw(saved.sdp1);
       setSdp2Raw(saved.sdp2);
       runCompare(saved.sdp1, saved.sdp2);
     }
-  }, [runCompare]);
+  }, [runCompare, searchParams]);
 
   // ── Debounced auto-compare on text change ───────────────────────
 
@@ -284,5 +298,15 @@ export default function ComparePage() {
         </p>
       </footer>
     </div>
+  );
+}
+
+// ── Default export with Suspense boundary (required by useSearchParams) ─
+
+export default function ComparePage() {
+  return (
+    <Suspense>
+      <ComparePageInner />
+    </Suspense>
   );
 }

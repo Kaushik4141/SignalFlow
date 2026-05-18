@@ -13,8 +13,14 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "SignalFlow — WebRTC SDP Analyzer",
-  description: "Paste your WebRTC offer/answer SDPs and get instant diagnostics, diff, and source detection.",
+  title: "SignalFlow — SDP Diff & WebRTC Debugger",
+  description:
+    "Paste two WebRTC SDP strings and instantly see what changed, why your call is failing, and how to fix it.",
+  openGraph: {
+    title: "SignalFlow SDP Diff",
+    description:
+      "Visual SDP diff with plain-English diagnosis for WebRTC developers",
+  },
 };
 
 export default function RootLayout({
